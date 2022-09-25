@@ -7,8 +7,8 @@ import time
 import torch
 import ctypes
 
-from fairseq import checkpoint_utils, distributed_utils, options, utils
-from fairseq.logging import metrics, progress_bar
+from fairseq import checkpoint_utils, options, utils
+from fairseq.logging import progress_bar
 
 logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
@@ -23,7 +23,6 @@ logger = logging.getLogger("fairseq_cli.validate")
 def main(args, override_args=None):
     utils.import_user_module(args)
 
-    use_fp16 = args.fp16
     use_cuda = torch.cuda.is_available() and not args.cpu
 
     if use_cuda:
@@ -44,24 +43,16 @@ def main(args, override_args=None):
 
     # Move models to GPU
     for model in models:
-        if use_fp16:
-            model.half()
         if use_cuda:
             model.cuda()
 
     # --- check existent saved data store
-    if args.dstore_fp16:
-        print('Saving fp16')
-        dstore_keys = np.memmap(args.dstore_mmap + '/keys.npy', dtype=np.float16, mode='r',
-                                shape=(args.dstore_size, args.decoder_embed_dim))
-        dstore_vals = np.memmap(args.dstore_mmap + '/vals.npy', dtype=np.int, mode='r',
-                                shape=(args.dstore_size, 1))
-    else:
-        print('Saving fp32')
-        dstore_keys = np.memmap(args.dstore_mmap + '/keys.npy', dtype=np.float32, mode='r',
-                                shape=(args.dstore_size, args.decoder_embed_dim))
-        dstore_vals = np.memmap(args.dstore_mmap + '/vals.npy', dtype=np.int, mode='r',
-                                shape=(args.dstore_size, 1))
+
+    print('Saving fp32')
+    dstore_keys = np.memmap(args.dstore_mmap + '/keys.npy', dtype=np.float32, mode='r',
+                            shape=(args.dstore_size, args.decoder_embed_dim))
+    dstore_vals = np.memmap(args.dstore_mmap + '/vals.npy', dtype=np.int, mode='r',
+                            shape=(args.dstore_size, 1))
 
 
     dstore_idx = 0
@@ -138,23 +129,19 @@ def main(args, override_args=None):
                 current_batch_count = target.size(0)
                 if (args.dstore_size + dstore_idx) + current_batch_count > updated_dstore_size:
                     reduce_size = updated_dstore_size - (dstore_idx+args.dstore_size)
-                    features1 = features[:reduce_size]
-                    target1 = target[:reduce_size]
+                    features = features[:reduce_size]
+                    target = target[:reduce_size]
                     #if args.save_plain_text:
                     #    src_tokens = src_tokens[:reduce_size, :]
                 else:
                     reduce_size = current_batch_count
-                    features1=features
-                    target1=target
 
                 #add new keys and vals to 'corrected' datastore
                 #new keys
-                updated_dstore_keys[(args.dstore_size+dstore_idx):(args.dstore_size+reduce_size + dstore_idx)] = features1.detach().cpu().numpy().astype(
+                updated_dstore_keys[(args.dstore_size+dstore_idx):(args.dstore_size+reduce_size + dstore_idx)] = features.detach().cpu().numpy().astype(
                     np.float32) 
                 #new vals
-                updated_dstore_vals[(args.dstore_size+dstore_idx):(args.dstore_size+reduce_size + dstore_idx)] = target1.unsqueeze(-1).cpu().numpy().astype(np.int) 
-                
-
+                updated_dstore_vals[(args.dstore_size+dstore_idx):(args.dstore_size+reduce_size + dstore_idx)] = target.unsqueeze(-1).cpu().numpy().astype(np.int) 
                 
                 dstore_idx += reduce_size
 
@@ -162,50 +149,45 @@ def main(args, override_args=None):
                     print('much more than dstore size break')
                     break
 
-        # ADD CORRECTIONS TO FAISS INDEX
+    # ADD CORRECTIONS TO FAISS INDEX
 
-        res = faiss.StandardGpuResources()
-        # to speed up access to np.memmap
-        madvise = ctypes.CDLL("libc.so.6").madvise
-        madvise.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int]
-        madvise.restype = ctypes.c_int
-        assert madvise(updated_dstore_keys.ctypes.data, updated_dstore_keys.size * updated_dstore_keys.dtype.itemsize, 1) == 0, "MADVISE FAILED" # 2 means MADV_SEQUENTIAL
-
-        #new_keys=updated_dstore_keys[args.dstore_size:updated_dstore_size]
-        #new_vals=updated_dstore_vals[args.dstore_size:updated_dstore_size]
-
-        np.random.seed(args.seed)
-        #random_sample = np.random.choice(np.arange(new_keys.shape[0]), size=[min(1000000, new_keys.shape[0])],replace=False)
+    # to speed up access to np.memmap
+    madvise = ctypes.CDLL("libc.so.6").madvise
+    madvise.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int]
+    madvise.restype = ctypes.c_int
+    assert madvise(updated_dstore_keys.ctypes.data, updated_dstore_keys.size * updated_dstore_keys.dtype.itemsize, 1) == 0, "MADVISE FAILED" # 2 means MADV_SEQUENTIAL
+   
+    new_keys=updated_dstore_keys[args.dstore_size:updated_dstore_size]
+    new_vals=updated_dstore_vals[args.dstore_size:updated_dstore_size]
         
-        #READ INDEX
-        print("READING INDEX")
-        index=faiss.read_index(args.faiss_index)
+    #READ INDEX
+    print("READING INDEX")
+    index=faiss.read_index(args.faiss_index)
 
-        print("READ INDEX SUCCESSFULLY")
+    print("INDEX READ SUCCESSFULLY")
 
-        print("ADDING TO INDEX")
-        #index.add(new_keys[random_sample].astype(np.float32))
+    print("ADDING TO INDEX...")
 
-        start_time = time.time()
-        start=args.dstore_size
-        num_keys_to_add_at_a_time= 1000000
-        while start < updated_dstore_size:
-            end = min(updated_dstore_size, start + num_keys_to_add_at_a_time)
-            to_add = updated_dstore_keys[start:end].copy()
+    start_time = time.time()
+    start=0
+    num_keys_to_add_at_a_time= 100000
+    while start < updated_dstore_size-args.dstore_size:
+        end = min(updated_dstore_size-args.dstore_size, start + num_keys_to_add_at_a_time)
+        to_add = new_keys[start:end].copy()
 
-            index.add_with_ids(to_add.astype(np.float32), np.arange(start, end))  #add or add with ids
+        index.add(torch.from_numpy(to_add.astype(np.float32)))  #add or add with ids
 
-            start += num_keys_to_add_at_a_time
+        start += num_keys_to_add_at_a_time
 
-            if (start % 1000000) == 0:
-                print('Added %d tokens so far' % start)
-                print('Writing Index', start)
-                faiss.write_index(index, args.update_dstore+'/knn_index')
+        if (start % 1000) == 0:
+            print('Added %d tokens so far' % start)
+            print('Writing Index', start)
+            faiss.write_index(index, args.update_dstore+'/knn_index')
 
-        print("Adding total %d keys" % end)
-        print('Adding took {} s'.format(time.time() - start_time))
+    print("Adding total %d keys" % end)
+    print('Adding took {} s'.format(time.time() - start_time))
 
-        faiss.write_index(index, args.update_dstore+'/knn_index')
+    faiss.write_index(index, args.update_dstore+'/knn_index')
 
 
 

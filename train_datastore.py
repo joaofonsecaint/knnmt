@@ -28,8 +28,6 @@ parser.add_argument("--nbits", default=8, type=int)
 
 args = parser.parse_args()
 
-print(args)
-
 res = faiss.StandardGpuResources()
 
 # load the saved keys and values

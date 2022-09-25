@@ -8,6 +8,7 @@ import faiss
 import time
 import torch
 from tqdm import tqdm
+import torch
 
 from fairseq import checkpoint_utils, distributed_utils, options, utils
 from fairseq.logging import metrics, progress_bar
